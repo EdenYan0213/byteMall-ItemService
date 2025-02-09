@@ -5,10 +5,11 @@ import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
 import lombok.Data;
 
+import java.io.Serializable;
 import java.util.List;
 
 @Data
-public class ItemDTO {
+public class ItemDTO implements Serializable {
     private Long id;
     private String name;
     private Integer price;

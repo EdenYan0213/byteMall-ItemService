@@ -46,9 +46,14 @@ public class ItemController {
         if (itemDTO == null){
             return ApiResult.failed("商品不存在");
         }
-        return ApiResult.success();
+        return ApiResult.success(itemDTO);
     }
 
+    @GetMapping("/ids")
+    public ApiResult<List<ItemDTO>> queryItemByIds(@RequestParam("ids") List<Long> ids){
+        log.info("根据商品id查询商品详情");
+        return ApiResult.success(itemService.queryItemByIds(ids));
+    }
     /**
      * 根据商品名称查询商品详情
      * @param name
