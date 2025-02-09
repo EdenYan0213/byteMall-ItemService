@@ -1,0 +1,4 @@
+byte:
+  db:
+    host: localhost
+    pw: root
