@@ -104,7 +104,7 @@ public class ItemController {
     @DeleteMapping("/delete/{id}")
     public ApiResult deleteItem(@PathVariable("id") Long id){
         log.info("删除商品");
-        boolean isSuccess = itemService.removeById(id);
+        boolean isSuccess = itemService.deleteItem(id);
         if (isSuccess){
             return ApiResult.success();
         }else {
