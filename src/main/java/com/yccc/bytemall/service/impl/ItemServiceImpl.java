@@ -235,12 +235,16 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
     public List<ItemDTO> queryItemByName(String name) {
         // 判断name是否为空
         if (name != null) {
-            List<Item> items = baseMapper.selectList(new QueryWrapper<Item>().like("name", '%' + name + '%'));
-            List<ItemDTO> itemDTOList = new ArrayList<>();
-            for (Item item : items) {
-                ItemDTO itemDTO = itemToItemDTO(item);
-                itemDTOList.add(itemDTO);
+            //原来使用模糊匹配，不能使用索引，效率不高
+//            List<Item> items = baseMapper.selectList(new QueryWrapper<Item>().like("name", '%' + name + '%'));
+            //判断name是否以"开头，如果不是，则添加双引号，不然全文索引会报错
+            if(!name.startsWith("\"")){
+                name="\""+name+"\"";
             }
+            //使用全文索引的查询id
+            List<Long> itemIds = itemMapper.queryItemByName(name);
+            //使用ids查询商品信息，返回商品信息
+            List<ItemDTO> itemDTOList = this.queryItemByIds(itemIds);
             return itemDTOList;
         } else {
             // name为空，打印错误日志并返回null
