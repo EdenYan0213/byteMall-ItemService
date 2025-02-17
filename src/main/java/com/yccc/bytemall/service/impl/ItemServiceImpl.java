@@ -401,12 +401,8 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         itemDTO.setName(item.getName());
         itemDTO.setPrice(item.getPrice());
         itemDTO.setImage(item.getImage());
-<<<<<<< HEAD
         itemDTO.setStock(item.getStock());
         List<Category>category =categoryMapper.selectList(new QueryWrapper<Category>().eq("item_id",item.getId()));
-=======
-        List<Category> category = categoryMapper.selectList(new QueryWrapper<Category>().eq("item_id", item.getId()));
->>>>>>> itemService
         List<String> categoryName = category.stream().map(Category::getName).collect(Collectors.toList());
         itemDTO.setCategory(categoryName);
         itemDTO.setBrand(item.getBrand());
