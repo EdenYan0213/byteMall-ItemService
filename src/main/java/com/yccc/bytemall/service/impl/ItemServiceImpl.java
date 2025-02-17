@@ -11,14 +11,24 @@ import com.yccc.bytemall.entity.po.Item;
 import com.yccc.bytemall.mapper.CategoryMapper;
 import com.yccc.bytemall.mapper.ItemMapper;
 import com.yccc.bytemall.service.IItemService;
+import com.yccc.bytemall.util.BloomFilterUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RBloomFilter;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.StringCodec;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.Resource;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -32,32 +42,111 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
     @Autowired
     private RedisTemplate redisTemplate;
 
-    private int exipreTime=30*60*1000;
+    private int exipreTime = 30 * 60 * 1000;
+
+    // 预期插入数量
+    static long expectedInsertions = 80000L;
+    // 误判率
+    static double falseProbability = 0.05;
+
+    // 非法请求所返回的JSON
+    static String illegalJson = "[\n" +
+            "    \"com.yccc.bytemall.entity.Item\",\n" +
+            "    {\n" +
+            "        \"id\": null,\n" +
+            "        \"name\": \"null\",\n" +
+            "        \"description\": null,\n" +
+            "        \"price\": null\n" +
+            "    }\n" +
+            "]";
+
+    private RBloomFilter<Long> bloomFilter = null;
+
+    @Resource
+    private BloomFilterUtil bloomFilterUtil;
+
+    @Resource
+    private RedissonClient redissonClient;
+    @Autowired
+    private ItemMapper itemMapper;
+
+    @PostConstruct
+    public void init() {
+        // 异步初始化布隆过滤器
+        CompletableFuture.runAsync(this::initializeBloomFilter);
+    }
+
+    @Async
+    public void initializeBloomFilter() {
+        // 启动项目时初始化bloomFilter
+        bloomFilter = bloomFilterUtil.create("itemIdWhiteList", expectedInsertions, falseProbability);
+
+        int pageSize = 100000;
+        int pageNumber = 0;
+        List<Item> itemsList;
+
+//        do {
+            itemsList = itemMapper.selectPage(new Page<>(pageNumber++, pageSize), null).getRecords();
+            for (Item item : itemsList) {
+                bloomFilter.add(item.getId());
+            }
+//        } while (!itemsList.isEmpty());
+
+        log.info("布隆过滤器初始化完成");
+    }
 
     @Override
+    @Cacheable(cacheNames = "item", key = "#id", unless = "#result == null")
     public ItemDTO queryItemById(Long id) {
-        //构造Redis中的key，规则：item_id
-        String key="item_"+id;
-        //先从Redis查询商品
-        ItemDTO itemDTO=(ItemDTO) redisTemplate.opsForValue().get(key);
-        if(itemDTO!=null){
-            log.info("从Redis中获取商品信息");
-            return itemDTO;
-        }
-        //不存在就去数据库查询，并放入Redis
-        // 查询商品信息
-        Item item = baseMapper.selectById(id);
-        // 若商品存在，组装商品信息
-        if (item != null) {
-            itemDTO=itemToItemDTO(item);
-            redisTemplate.opsForValue().set(key,itemDTO,exipreTime, TimeUnit.MILLISECONDS);
-            return itemDTO;
-        }
-        else {
-            // 商品不存在，打印错误日志并返回null
-            log.error("商品不存在");
+        if (!bloomFilter.contains(id)) {
+            log.info("所要查询的数据既不在缓存中，也不在数据库中，为非法key");
+            redissonClient.getBucket("item::" + id, new StringCodec()).set(illegalJson, new Random().nextInt(200) + 300, TimeUnit.SECONDS);
             return null;
         }
+        Item item = null;
+        String lockKey = "lock:item::" + id;
+        try {
+            // 获取锁
+            boolean islock = tryLock(lockKey);
+            if(!islock){
+                //获取锁失败，等待一段时间再重试
+                Thread.sleep(50);
+                return queryItemById(id);
+            }
+            // 查询商品信息
+            item = baseMapper.selectById(id);
+            // 若商品存在，组装商品信息
+            if (item == null) {
+                // 商品不存在，打印错误日志并返回null
+                log.error("商品不存在");
+                return null;
+            }
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            // 释放锁
+            unLock(lockKey);
+        }
+        return itemToItemDTO(item);
+    }
+
+    /**
+     * 尝试获取锁
+     * @param key
+     * @return
+     */
+    private boolean tryLock(String key){
+        Boolean flag = redisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+        return flag != null && flag;
+    }
+
+    /**
+     * 释放锁
+     * @param key
+     */
+    // 释放锁
+    private void unLock(String key){
+        redisTemplate.delete(key);
     }
 
     @Override
@@ -74,7 +163,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
 
         // 构造Redis中的key，规则：item_id
         List<String> keys = ids.stream()
-                .map(id -> "item_" + id)
+                .map(id -> "item::" + id)
                 .collect(Collectors.toList());
         log.info(keys.toString());
 
@@ -93,7 +182,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
             // 检查是否有缺失的商品信息
             List<Long> missingIds = IntStream.range(0, keys.size())
                     .filter(i -> itemDTOs.get(i) == null)
-                    .mapToObj(i -> Long.parseLong(keys.get(i).split("_")[1]))
+                    .mapToObj(i -> Long.parseLong(keys.get(i).split("::")[1]))
                     .collect(Collectors.toList());
 
             if (!missingIds.isEmpty()) {
@@ -106,7 +195,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
 
                     // 更新Redis缓存并设置过期时间
                     for (int i = 0; i < missingIds.size(); i++) {
-                        String key = "item_" + missingIds.get(i);
+                        String key = "item::" + missingIds.get(i);
                         ItemDTO itemDTO = missingItemDTOs.get(i);
                         // 设置过期时间为1小时（3600000毫秒）
                         valueOps.set(key, itemDTO, exipreTime, TimeUnit.MILLISECONDS);
@@ -142,21 +231,22 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         }
     }
 
-
-
     @Override
     public List<ItemDTO> queryItemByName(String name) {
         // 判断name是否为空
         if (name != null) {
-            List<Item> items = baseMapper.selectList(new QueryWrapper<Item>().like("name", '%'+name+'%'));
-            List<ItemDTO> itemDTOList = new ArrayList<>();
-            for(Item item : items){
-                ItemDTO itemDTO = itemToItemDTO(item);
-                itemDTOList.add(itemDTO);
+            //原来使用模糊匹配，不能使用索引，效率不高
+//            List<Item> items = baseMapper.selectList(new QueryWrapper<Item>().like("name", '%' + name + '%'));
+            //判断name是否以"开头，如果不是，则添加双引号，不然全文索引会报错
+            if(!name.startsWith("\"")){
+                name="\""+name+"\"";
             }
+            //使用全文索引的查询id
+            List<Long> itemIds = itemMapper.queryItemByName(name);
+            //使用ids查询商品信息，返回商品信息
+            List<ItemDTO> itemDTOList = this.queryItemByIds(itemIds);
             return itemDTOList;
-        }
-        else {
+        } else {
             // name为空，打印错误日志并返回null
             log.error("name为空");
             return null;
@@ -165,7 +255,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
 
     @Override
     public Page<ItemDTO> pageQuery(int page, int pageSize, String categoryName) {
-        if (categoryName != null&&categoryName!="") {
+        if (categoryName != null && !categoryName.isEmpty()) {
             // 查询类别ID
             List<Long> itemIds = categoryMapper.selectList(new QueryWrapper<Category>().eq("name", categoryName))
                     .stream().map(Category::getItemId).collect(Collectors.toList());
@@ -234,10 +324,8 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         boolean saved = save(item);
         if (saved) {
             log.info("商品插入成功");
-            redisTemplate.opsForValue().set("item_"+item.getId()
-                    ,itemDTO,exipreTime, TimeUnit.MILLISECONDS);
-            for(String categoryName:itemDTO.getCategory())
-            {
+            redisTemplate.opsForValue().set("item::" + item.getId(), itemDTO, exipreTime, TimeUnit.MILLISECONDS);
+            for (String categoryName : itemDTO.getCategory()) {
                 Category category = Category.builder()
                         .name(categoryName)
                         .itemId(item.getId())
@@ -256,15 +344,15 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         Long id = itemDTO.getId();
         if (id != null) {
             Item item = baseMapper.selectById(id);
-            redisTemplate.delete("item_"+id);
+            redisTemplate.delete("item::" + id);
 
             if (item != null) {
 
                 if (itemDTO.getCategory() != null) {
-                    //删除原来的类别
+                    // 删除原来的类别
                     categoryMapper.delete(new QueryWrapper<Category>().eq("item_id", id));
                 }
-                //构建更新后的商品对象
+                // 构建更新后的商品对象
                 item.setName(itemDTO.getName());
                 item.setPrice(itemDTO.getPrice());
                 item.setImage(itemDTO.getImage());
@@ -274,23 +362,32 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
                 item.setUpdateTime(LocalDateTime.now());
 
                 // 更新商品对应的类别
-                for(String categoryName:itemDTO.getCategory())
-                {
+                for (String categoryName : itemDTO.getCategory()) {
                     Category category = Category.builder()
                             .name(categoryName)
                             .itemId(id)
                             .build();
                     categoryMapper.insert(category);
                 }
-                redisTemplate.opsForValue().set("item_"+id,itemDTO,
-                        exipreTime, TimeUnit.MILLISECONDS);
+                redisTemplate.opsForValue().set("item::" + id, itemDTO, exipreTime, TimeUnit.MILLISECONDS);
                 return updateById(item);
             }
-        }else {
+        } else {
             log.error("商品不存在");
             return false;
         }
         return true;
+    }
+
+    @CacheEvict(cacheNames = "item", key = "#id")
+    @Override
+    public boolean deleteItem(Long id) {
+        if (id != null) {
+            itemMapper.deleteById(id);
+            categoryMapper.delete(new QueryWrapper<Category>().eq("item_id", id));
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -304,13 +401,15 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         itemDTO.setName(item.getName());
         itemDTO.setPrice(item.getPrice());
         itemDTO.setImage(item.getImage());
+<<<<<<< HEAD
         itemDTO.setStock(item.getStock());
         List<Category>category =categoryMapper.selectList(new QueryWrapper<Category>().eq("item_id",item.getId()));
+=======
+        List<Category> category = categoryMapper.selectList(new QueryWrapper<Category>().eq("item_id", item.getId()));
+>>>>>>> itemService
         List<String> categoryName = category.stream().map(Category::getName).collect(Collectors.toList());
         itemDTO.setCategory(categoryName);
         itemDTO.setBrand(item.getBrand());
         return itemDTO;
     }
 }
-
-

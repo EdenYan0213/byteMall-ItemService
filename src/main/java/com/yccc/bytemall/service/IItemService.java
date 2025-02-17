@@ -56,4 +56,11 @@ public interface IItemService extends IService<Item> {
      * @return
      */
     boolean updateItem(ItemDTO itemDTO);
+
+    /**
+     * 删除商品信息
+     * @param id
+     * @return
+     */
+    boolean deleteItem(Long id);
 }
