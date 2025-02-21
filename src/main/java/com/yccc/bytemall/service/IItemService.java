@@ -18,8 +18,6 @@ public interface IItemService extends IService<Item> {
      */
     ItemDTO queryItemById(Long id);
 
-    void deductStock(List<OrderDetailDTO> items);
-
     /**
      * 根据商品id集合查询商品信息
      * @param ids

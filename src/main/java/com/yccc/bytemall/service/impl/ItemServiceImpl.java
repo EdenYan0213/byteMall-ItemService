@@ -14,6 +14,7 @@ import com.yccc.bytemall.service.IItemService;
 import com.yccc.bytemall.util.BloomFilterUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBloomFilter;
+import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -85,12 +86,10 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         int pageNumber = 0;
         List<Item> itemsList;
 
-//        do {
-            itemsList = itemMapper.selectPage(new Page<>(pageNumber++, pageSize), null).getRecords();
-            for (Item item : itemsList) {
-                bloomFilter.add(item.getId());
-            }
-//        } while (!itemsList.isEmpty());
+        itemsList = itemMapper.selectPage(new Page<>(pageNumber, pageSize), null).getRecords();
+        for (Item item : itemsList) {
+            bloomFilter.add(item.getId());
+        }
 
         log.info("布隆过滤器初始化完成");
     }
@@ -108,6 +107,7 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         try {
             // 获取锁
             boolean islock = tryLock(lockKey);
+            RLock lock = redissonClient.getLock(lockKey);
             if(!islock){
                 //获取锁失败，等待一段时间再重试
                 Thread.sleep(50);
@@ -149,10 +149,6 @@ public class ItemServiceImpl extends ServiceImpl<ItemMapper, Item> implements II
         redisTemplate.delete(key);
     }
 
-    @Override
-    public void deductStock(List<OrderDetailDTO> items) {
-
-    }
 
     @Override
     public List<ItemDTO> queryItemByIds(Collection<Long> ids) {
