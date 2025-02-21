@@ -1,5 +1,6 @@
 byte:
   db:
+    database: hm-item
     host: localhost
     pw: root
   redis:
